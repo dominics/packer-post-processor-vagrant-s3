@@ -2,12 +2,12 @@ package main
 
 import (
 	"bytes"
-	"math"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path"
 	"strings"
@@ -27,6 +27,7 @@ type Config struct {
 	BoxName      string `mapstructure:"box_name"`
 	BoxDir       string `mapstructure:"box_dir"`
 	Version      string `mapstructure:"version"`
+	ACL          s3.ACL `mapstructure:"acl"`
 
 	common.PackerConfig    `mapstructure:",squash"`
 	awscommon.AccessConfig `mapstructure:",squash"`
@@ -90,6 +91,10 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		p.s3 = s3.New(auth, region).Bucket(p.config.Bucket)
 	} else {
 		errs = packer.MultiErrorAppend(errs, fmt.Errorf("Invalid region specified: %s", p.config.Region))
+	}
+
+	if p.config.ACL == "" {
+		p.config.ACL = "public-read"
 	}
 
 	if len(errs.Errors) > 0 {
@@ -164,14 +169,14 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 	if size > 100*1024*1024 {
 		ui.Message("File size > 100MB. Initiating multipart upload")
 
-		multi, err := p.s3.InitMulti(boxPath, "application/octet-stream", "public-read")
+		multi, err := p.s3.InitMulti(boxPath, "application/octet-stream", p.config.ACL)
 		if err != nil {
 			return nil, false, err
 		}
 
 		ui.Message("Uploading...")
 
-		const chunkSize = 5*1024*1024
+		const chunkSize = 5 * 1024 * 1024
 
 		totalParts := int(math.Ceil(float64(size) / float64(chunkSize)))
 		totalUploadSize := int64(0)
@@ -182,20 +187,20 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 
 		for partNum := int(1); partNum <= totalParts; partNum++ {
 
-			filePos, err := file.Seek(0,1)
-			
-			partSize := int64(math.Min(chunkSize, float64(size - filePos)))
+			filePos, err := file.Seek(0, 1)
+
+			partSize := int64(math.Min(chunkSize, float64(size-filePos)))
 			partBuffer := make([]byte, partSize)
 
 			ui.Message(fmt.Sprintf("Upload: Uploading part %d of %d, %d (of max %d) bytes", partNum, int(totalParts), int(partSize), int(chunkSize)))
 
-		  	readBytes, err := file.Read(partBuffer)
+			readBytes, err := file.Read(partBuffer)
 			ui.Message(fmt.Sprintf("Upload: Read %d bytes from box file on disk", readBytes))
 
 			bufferReader := bytes.NewReader(partBuffer)
 			part, err := multi.PutPart(partNum, bufferReader)
 
-			parts[partNum - 1] = part
+			parts[partNum-1] = part
 
 			if err != nil {
 
@@ -222,7 +227,7 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 			return nil, false, err
 		}
 	} else {
-		if err := p.s3.PutReader(boxPath, file, size, "application/octet-stream", "public-read"); err != nil {
+		if err := p.s3.PutReader(boxPath, file, size, "application/octet-stream", p.config.ACL); err != nil {
 			return nil, false, err
 		}
 	}
@@ -257,7 +262,7 @@ func (p *PostProcessor) putManifest(manifest *Manifest) error {
 	if err := json.NewEncoder(&buf).Encode(manifest); err != nil {
 		return err
 	}
-	if err := p.s3.Put(p.config.ManifestPath, buf.Bytes(), "application/json", "public-read"); err != nil {
+	if err := p.s3.Put(p.config.ManifestPath, buf.Bytes(), "application/json", p.config.ACL); err != nil {
 		return err
 	}
 	return nil
